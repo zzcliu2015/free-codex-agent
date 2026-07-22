@@ -1,0 +1,27 @@
+﻿# Generated Codex Agent Identity secrets
+auth.json
+*_auth.json
+results/
+
+# Input/session/token files
+tokens.txt
+*.tokens
+*.list
+session.json
+sessions.json
+*session*.json
+*.secret
+*.env
+.env
+.env.*
+
+# Python cache
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
