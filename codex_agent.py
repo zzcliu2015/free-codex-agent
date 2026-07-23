@@ -790,12 +790,15 @@ class BatchRun:
         failed = sum(1 for r in self.results if r.get("status") != "success")
         sub_import_summary = None
         if self.sub_import_result:
+            proxy_clear_rows = self.sub_import_result.get("proxy_clear") or []
             sub_import_summary = {
                 "total": self.sub_import_result.get("total", 0),
                 "created": self.sub_import_result.get("created", 0),
                 "updated": self.sub_import_result.get("updated", 0),
                 "skipped": self.sub_import_result.get("skipped", 0),
                 "failed": self.sub_import_result.get("failed", 0),
+                "proxy_cleared": sum(1 for x in proxy_clear_rows if isinstance(x, dict) and x.get("success") is True),
+                "proxy_clear_failed": sum(1 for x in proxy_clear_rows if isinstance(x, dict) and x.get("success") is not True),
             }
 
         account_test_summary = None
@@ -1176,7 +1179,9 @@ class Sub2APIClient:
         )
         return data
 
-    def test_imported_accounts(self, import_result: dict[str, Any]) -> list[dict[str, Any]]:
+    @staticmethod
+    def imported_account_ids(import_result: dict[str, Any]) -> list[int]:
+        """从 sub 导入响应里提取账号 ID，自动去重。"""
         account_ids: list[int] = []
         for item in import_result.get("items", []) if isinstance(import_result, dict) else []:
             if not isinstance(item, dict):
@@ -1184,9 +1189,47 @@ class Sub2APIClient:
             raw_id = item.get("account_id") or item.get("accountId")
             if raw_id is None:
                 continue
-            account_id = int(raw_id)
-            if account_id not in account_ids:
+            try:
+                account_id = int(raw_id)
+            except Exception:
+                continue
+            if account_id > 0 and account_id not in account_ids:
                 account_ids.append(account_id)
+        return account_ids
+
+    def clear_account_proxy(self, account_id: int) -> dict[str, Any]:
+        """清除 sub 账号代理。sub 的更新接口约定 proxy_id=0 表示清除代理。"""
+        data = self._request(
+            "PUT",
+            f"/api/v1/admin/accounts/{int(account_id)}",
+            json={"proxy_id": 0},
+            headers={"Idempotency-Key": f"codex-agent-clear-proxy-{uuid.uuid4()}"},
+            timeout=60,
+        )
+        if isinstance(data, dict):
+            return data
+        return {"account_id": int(account_id), "result": data}
+
+    def clear_imported_account_proxies(self, import_result: dict[str, Any]) -> list[dict[str, Any]]:
+        """导入后立即清除本次 created/updated 账号上的代理，避免复用旧账号时继承旧代理。"""
+        results: list[dict[str, Any]] = []
+        for account_id in self.imported_account_ids(import_result):
+            try:
+                data = self.clear_account_proxy(account_id)
+                row = {"account_id": account_id, "success": True}
+                if isinstance(data, dict):
+                    proxy_id = data.get("proxy_id") or data.get("proxyId")
+                    row["proxy_id"] = proxy_id
+                results.append(row)
+                _log("Sub Proxy", f"account_id={account_id} 已清除代理", "OK")
+            except Exception as e:
+                row = {"account_id": account_id, "success": False, "message": redact_text(str(e))}
+                results.append(row)
+                _log("Sub Proxy", f"account_id={account_id} 清除代理失败: {e}", "WARN")
+        return results
+
+    def test_imported_accounts(self, import_result: dict[str, Any]) -> list[dict[str, Any]]:
+        account_ids = self.imported_account_ids(import_result)
 
         results: list[dict[str, Any]] = []
         for account_id in account_ids:
@@ -1338,6 +1381,7 @@ def run_batch(args: argparse.Namespace) -> BatchRun:
             skip_default_group_bind=not args.sub_bind_default_group,
             confirm_mixed_channel_risk=True if args.sub_confirm_mixed_channel_risk else None,
         )
+        import_result["proxy_clear"] = client.clear_imported_account_proxies(import_result)
         batch_run.sub_import_result = import_result
         batch_run.sub_import_result_path = batch_run.run_dir / "sub_import_result.json"
         write_json(batch_run.sub_import_result_path, import_result)
@@ -1382,6 +1426,7 @@ def run_single(args: argparse.Namespace) -> dict[str, Any]:
             skip_default_group_bind=not args.sub_bind_default_group,
             confirm_mixed_channel_risk=True if args.sub_confirm_mixed_channel_risk else None,
         )
+        result["proxy_clear"] = client.clear_imported_account_proxies(result)
         import_result_path = Path(output_path).with_name(Path(output_path).stem + "_sub_import_result.json")
         write_json(import_result_path, result)
         _log("Sub Import", f"导入结果已保存 {import_result_path}", "OK")

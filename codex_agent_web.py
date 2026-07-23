@@ -368,6 +368,7 @@ def run_job(job: WebJob, payload: dict[str, Any]) -> None:
                                 skip_default_group_bind=skip_default_group_bind,
                                 confirm_mixed_channel_risk=confirm_mixed_channel_risk,
                             )
+                            import_result["proxy_clear"] = sub_client.clear_imported_account_proxies(import_result)
                             merge_sub_import_result(sub_import_acc, import_result, batch_index=batch_index)
                             batch_run.sub_import_result = sub_import_acc
                             batch_run.sub_import_result_path = batch_run.run_dir / "sub_import_result.json"
@@ -428,7 +429,8 @@ def run_job(job: WebJob, payload: dict[str, Any]) -> None:
                         "即时导入完成："
                         f"total={sub_import_acc.get('total', 0)} created={sub_import_acc.get('created', 0)} "
                         f"updated={sub_import_acc.get('updated', 0)} skipped={sub_import_acc.get('skipped', 0)} "
-                        f"failed={sub_import_acc.get('failed', 0)}",
+                        f"failed={sub_import_acc.get('failed', 0)} "
+                        f"proxy_cleared={sum(1 for x in sub_import_acc.get('proxy_clear', []) if isinstance(x, dict) and x.get('success') is True)}",
                         "OK" if int(sub_import_acc.get("failed", 0) or 0) == 0 else "WARN",
                     )
 
@@ -496,6 +498,16 @@ def batch_live_summary(batch_run: agent.BatchRun, total_items: int) -> dict[str,
                 "updated": batch_run.sub_import_result.get("updated", 0),
                 "skipped": batch_run.sub_import_result.get("skipped", 0),
                 "failed": batch_run.sub_import_result.get("failed", 0),
+                "proxy_cleared": sum(
+                    1
+                    for x in (batch_run.sub_import_result.get("proxy_clear") or [])
+                    if isinstance(x, dict) and x.get("success") is True
+                ),
+                "proxy_clear_failed": sum(
+                    1
+                    for x in (batch_run.sub_import_result.get("proxy_clear") or [])
+                    if isinstance(x, dict) and x.get("success") is not True
+                ),
             }
             if batch_run.sub_import_result
             else None
@@ -513,6 +525,7 @@ def new_sub_import_accumulator() -> dict[str, Any]:
         "items": [],
         "warnings": [],
         "errors": [],
+        "proxy_clear": [],
     }
 
 
@@ -527,6 +540,13 @@ def merge_sub_import_result(acc: dict[str, Any], result: dict[str, Any], *, batc
                     value = dict(value)
                     value["batch_index"] = batch_index
                 acc.setdefault(key, []).append(value)
+    proxy_values = result.get("proxy_clear") or []
+    if isinstance(proxy_values, list):
+        for value in proxy_values:
+            if isinstance(value, dict) and batch_index is not None:
+                value = dict(value)
+                value["batch_index"] = batch_index
+            acc.setdefault("proxy_clear", []).append(value)
     return acc
 
 
@@ -1276,7 +1296,8 @@ INDEX_HTML = r"""<!doctype html>
         const subTotal = si.total || 0;
         const subOk = (si.created || 0) + (si.updated || 0) + (si.skipped || 0);
         const subFailed = si.failed || 0;
-        $('statSub').textContent = subTotal ? (subOk + '/' + subTotal + (subFailed ? ' F' + subFailed : '')) : '-';
+        const proxyCleared = si.proxy_cleared || 0;
+        $('statSub').textContent = subTotal ? (subOk + '/' + subTotal + (subFailed ? ' F' + subFailed : '') + (proxyCleared ? ' 清代理' + proxyCleared : '')) : '-';
       }else{
         $('statSub').textContent = '-';
       }
